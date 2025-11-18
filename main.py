@@ -1,7 +1,15 @@
+import os
+from dotenv import load_dotenv
+from openai import OpenAI
 import json
-# from openai import OpenAI  # or whatever client you use
 
-# client = OpenAI()
+load_dotenv()  # load from .env
+
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise RuntimeError("OPENAI_API_KEY is not set or empty")
+
+client = OpenAI(api_key=api_key)
 
 SYSTEM_PROMPT = """
 You are a scriptwriter for TikTok and YouTube Shorts. 
@@ -30,11 +38,11 @@ Requirements:
 
 Return your answer as valid JSON exactly in this format:
 
-{
+{{
   "hook": "string",
   "lines": ["string", "string", "..."],
   "closer": "string"
-}
+}}
 
 Story idea:
 ---
@@ -46,35 +54,23 @@ Story idea:
 def generate_script(idea: str) -> dict:
     user_prompt = build_user_prompt(idea)
 
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",  # or whatever model you want
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.8,
+    )
 
-    raw_text = """{
-      "hook": "He used to be the strongest sorcerer alive. Now he can’t even open a cursed door.",
-      "lines": [
-        "Gojo wakes up to an alarm instead of a mission call.",
-        "No blindfold, no uniform. Just a wrinkled dress shirt and a stack of graded quizzes.",
-        "The students only know him as the weird new teacher who stares out the window too long.",
-        "He reaches for cursed energy on instinct… and feels nothing.",
-        "The city feels louder without the hum of spirits in the background.",
-        "For the first time, he has to rely on train schedules, paychecks, and coffee to survive."
-      ],
-      "closer": "And on an ordinary Tuesday, something in the crowd looks back at him with eyes that remember his power."
-    }"""
+    raw_text = response.choices[0].message.content
 
-    # Parse JSON safely
     try:
         data = json.loads(raw_text)
     except json.JSONDecodeError as e:
         print("Failed to parse JSON from model:", e)
         print("Raw text:", raw_text)
         raise
-
-    # Basic sanity checks
-    if not isinstance(data.get("hook"), str):
-        raise ValueError("Missing or invalid 'hook'")
-    if not isinstance(data.get("lines"), list):
-        raise ValueError("Missing or invalid 'lines'")
-    if not isinstance(data.get("closer"), str):
-        raise ValueError("Missing or invalid 'closer'")
 
     return data
 
