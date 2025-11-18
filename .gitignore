@@ -1,0 +1,8 @@
+# env / secrets
+.env
+.env.local
+.env.*.local
+
+# Python (if using)
+__pycache__/
+*.pyc
