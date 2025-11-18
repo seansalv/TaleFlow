@@ -1,7 +1,10 @@
 import os
 from dotenv import load_dotenv
+from pydub import AudioSegment
 from openai import OpenAI
 import json
+import uuid
+
 
 load_dotenv()  # load from .env
 
@@ -74,8 +77,78 @@ def generate_script(idea: str) -> dict:
 
     return data
 
+def tts_to_file(text: str, out_path: str):
+    # Use streaming helper and save directly to file
+    with client.audio.speech.with_streaming_response.create(
+        model="gpt-4o-mini-tts",  # or "tts-1" if you prefer
+        voice="alloy",
+        input=text,
+        response_format="mp3",    # optional, mp3 is default, but explicit is nice
+    ) as resp:
+        resp.stream_to_file(out_path)
+
+    return out_path
+
+def synthesize_script_audio(script: dict, out_dir: str = "audio_out"):
+    os.makedirs(out_dir, exist_ok=True)
+
+    segments = []
+
+    # 1) Hook
+    hook_text = script["hook"]
+    hook_path = os.path.join(out_dir, f"hook_{uuid.uuid4().hex}.mp3")
+    tts_to_file(hook_text, hook_path)
+    hook_audio = AudioSegment.from_file(hook_path)
+    segments.append({"type": "hook", "text": hook_text, "path": hook_path, "audio": hook_audio})
+
+    # 2) Lines
+    for i, line in enumerate(script["lines"]):
+        line_path = os.path.join(out_dir, f"line_{i}_{uuid.uuid4().hex}.mp3")
+        tts_to_file(line, line_path)
+        line_audio = AudioSegment.from_file(line_path)
+        segments.append({"type": "line", "index": i, "text": line, "path": line_path, "audio": line_audio})
+
+    # 3) Closer
+    closer_text = script["closer"]
+    closer_path = os.path.join(out_dir, f"closer_{uuid.uuid4().hex}.mp3")
+    tts_to_file(closer_text, closer_path)
+    closer_audio = AudioSegment.from_file(closer_path)
+    segments.append({"type": "closer", "text": closer_text, "path": closer_path, "audio": closer_audio})
+
+    # Optional: merge into one file so you can play it easily
+    full = AudioSegment.silent(duration=0)
+    for seg in segments:
+        full += seg["audio"]
+
+    full_path = os.path.join(out_dir, "full_story.mp3")
+    full.export(full_path, format="mp3")
+
+    # Also return timing info (durations in ms)
+    timeline = []
+    cursor = 0
+    for seg in segments:
+        dur = len(seg["audio"])
+        timeline.append({
+            "type": seg["type"],
+            "text": seg["text"],
+            "start_ms": cursor,
+            "end_ms": cursor + dur,
+        })
+        cursor += dur
+
+    return {
+        "segments": segments,
+        "timeline": timeline,
+        "full_audio_path": full_path,
+    }
 
 if __name__ == "__main__":
     idea = "Gojo loses his powers and has to live like a normal teacher in Tokyo."
     script = generate_script(idea)
-    print(json.dumps(script, indent=2, ensure_ascii=False))
+    audio_info = synthesize_script_audio(script)
+
+    print("Full audio saved to:", audio_info["full_audio_path"])
+    print("Timeline:")
+    for t in audio_info["timeline"]:
+        print(t)
+

@@ -1,8 +1,10 @@
-# env / secrets
+# secrets
 .env
 .env.local
 .env.*.local
 
-# Python (if using)
+# python
 __pycache__/
 *.pyc
+.venv/
+audio_out/
