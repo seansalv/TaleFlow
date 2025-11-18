@@ -4,7 +4,8 @@ from pydub import AudioSegment
 from openai import OpenAI
 import json
 import uuid
-
+import moviepy
+from moviepy import AudioFileClip, TextClip, CompositeVideoClip, ColorClip
 
 load_dotenv()  # load from .env
 
@@ -142,13 +143,64 @@ def synthesize_script_audio(script: dict, out_dir: str = "audio_out"):
         "full_audio_path": full_path,
     }
 
+def create_video(script: dict, audio_info: dict, output_path: str = "storyshort_test.mp4"):
+    WIDTH, HEIGHT = 1080, 1920
+    BG_COLOR = (10, 10, 15)  # dark background
+
+    # Load full audio
+    audio_clip = AudioFileClip(audio_info["full_audio_path"])
+    total_duration = audio_clip.duration  # seconds
+
+    # Solid background (v2: use with_duration, not set_duration)
+    background = ColorClip(size=(WIDTH, HEIGHT), color=BG_COLOR).with_duration(total_duration)
+
+    text_clips = []
+
+    for t in audio_info["timeline"]:
+        start_s = t["start_ms"] / 1000.0
+        end_s = t["end_ms"] / 1000.0
+        dur_s = end_s - start_s
+
+        txt = t["text"]
+
+        # TextClip in v2: use with_start/with_duration/with_position
+        txt_clip = (
+            TextClip(
+                text=txt,  # 👈 IMPORTANT: keyword, not positional
+                font_size=60,
+                font=r"C:\Windows\Fonts\arial.ttf",  # 👈 common Windows font path
+                color="white",
+                method="caption",
+                size=(WIDTH - 200, None)
+            )
+            .with_start(start_s)
+            .with_duration(dur_s)
+            .with_position(("center", "center"))
+        )
+
+        text_clips.append(txt_clip)
+
+    # Composite background + all text clips
+    video = CompositeVideoClip([background, *text_clips]).with_audio(audio_clip)
+
+    # Export
+    video.write_videofile(
+        output_path,
+        fps=30,
+        codec="libx264",
+        audio_codec="aac"
+    )
+
+    return output_path
+
 if __name__ == "__main__":
     idea = "Gojo loses his powers and has to live like a normal teacher in Tokyo."
     script = generate_script(idea)
     audio_info = synthesize_script_audio(script)
 
     print("Full audio saved to:", audio_info["full_audio_path"])
-    print("Timeline:")
     for t in audio_info["timeline"]:
         print(t)
 
+    video_path = create_video(script, audio_info, output_path="storyshort_test.mp4")
+    print("Video saved to:", video_path)

@@ -8,3 +8,4 @@ __pycache__/
 *.pyc
 .venv/
 audio_out/
+storyshort_test.mp4
