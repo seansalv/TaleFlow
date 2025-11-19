@@ -2,12 +2,17 @@ import os
 import json
 import uuid
 import math
+from typing import List, Dict, Any
 
 from dotenv import load_dotenv
 from pydub import AudioSegment
 from openai import OpenAI
 from moviepy import AudioFileClip, TextClip, CompositeVideoClip, ColorClip
 
+
+# ---------------------------------------------------------------------------
+# Configuration / Setup
+# ---------------------------------------------------------------------------
 
 load_dotenv()
 
@@ -30,6 +35,10 @@ Your style:
 You ALWAYS respond with valid JSON only. No explanations, no markdown, no extra text.
 """.strip()
 
+
+# ---------------------------------------------------------------------------
+# Script generation (LLM)
+# ---------------------------------------------------------------------------
 
 def build_user_prompt(idea: str) -> str:
     return f"""
@@ -57,7 +66,7 @@ Story idea:
 """.strip()
 
 
-def generate_script(idea: str) -> dict:
+def generate_script(idea: str) -> Dict[str, Any]:
     user_prompt = build_user_prompt(idea)
 
     response = client.chat.completions.create(
@@ -81,7 +90,11 @@ def generate_script(idea: str) -> dict:
     return data
 
 
-def tts_to_file(text: str, out_path: str):
+# ---------------------------------------------------------------------------
+# Text-to-speech helpers
+# ---------------------------------------------------------------------------
+
+def tts_to_file(text: str, out_path: str) -> str:
     with client.audio.speech.with_streaming_response.create(
         model="gpt-4o-mini-tts",
         voice="alloy",
@@ -93,7 +106,11 @@ def tts_to_file(text: str, out_path: str):
     return out_path
 
 
-def chunk_timeline_entry(entry, words_per_chunk: int = 3):
+# ---------------------------------------------------------------------------
+# Timeline / caption utilities
+# ---------------------------------------------------------------------------
+
+def chunk_timeline_entry(entry: Dict[str, Any], words_per_chunk: int = 3) -> List[Dict[str, Any]]:
     """
     Takes a timeline entry like:
       {"text": "...", "start_ms": 0, "end_ms": 3000, "type": "line"}
@@ -109,7 +126,7 @@ def chunk_timeline_entry(entry, words_per_chunk: int = 3):
     total_ms = entry["end_ms"] - entry["start_ms"]
     chunk_ms = total_ms / num_chunks
 
-    chunks = []
+    chunks: List[Dict[str, Any]] = []
     for i in range(num_chunks):
         start_idx = i * words_per_chunk
         end_idx = min((i + 1) * words_per_chunk, len(words))
@@ -132,71 +149,123 @@ def chunk_timeline_entry(entry, words_per_chunk: int = 3):
     return chunks
 
 
-def synthesize_script_audio(script: dict, out_dir: str = "audio_out"):
+def build_chunked_timeline(timeline: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    chunked: List[Dict[str, Any]] = []
+    for entry in timeline:
+        if entry["type"] in ("hook", "closer"):
+            chunked.extend(chunk_timeline_entry(entry, words_per_chunk=4))
+        else:
+            chunked.extend(chunk_timeline_entry(entry, words_per_chunk=3))
+    return chunked
+
+
+# ---------------------------------------------------------------------------
+# Audio synthesis + timeline building
+# ---------------------------------------------------------------------------
+
+def synthesize_script_audio(script: Dict[str, Any], out_dir: str = "audio_out") -> Dict[str, Any]:
     os.makedirs(out_dir, exist_ok=True)
 
-    segments = []
+    # Collect segments as (type, text, duration_ms)
+    segments_meta: List[Dict[str, Any]] = []
 
     # Hook
     hook_text = script["hook"]
     hook_path = os.path.join(out_dir, f"hook_{uuid.uuid4().hex}.mp3")
     tts_to_file(hook_text, hook_path)
     hook_audio = AudioSegment.from_file(hook_path)
-    segments.append({"type": "hook", "text": hook_text, "path": hook_path, "audio": hook_audio})
+    segments_meta.append({"type": "hook", "text": hook_text, "duration_ms": len(hook_audio)})
 
     # Lines
     for i, line in enumerate(script["lines"]):
         line_path = os.path.join(out_dir, f"line_{i}_{uuid.uuid4().hex}.mp3")
         tts_to_file(line, line_path)
         line_audio = AudioSegment.from_file(line_path)
-        segments.append({"type": "line", "index": i, "text": line, "path": line_path, "audio": line_audio})
+        segments_meta.append({"type": "line", "text": line, "duration_ms": len(line_audio)})
 
     # Closer
     closer_text = script["closer"]
     closer_path = os.path.join(out_dir, f"closer_{uuid.uuid4().hex}.mp3")
     tts_to_file(closer_text, closer_path)
     closer_audio = AudioSegment.from_file(closer_path)
-    segments.append({"type": "closer", "text": closer_text, "path": closer_path, "audio": closer_audio})
+    segments_meta.append({"type": "closer", "text": closer_text, "duration_ms": len(closer_audio)})
 
     # Merge into one file
     full = AudioSegment.silent(duration=0)
-    for seg in segments:
-        full += seg["audio"]
+    for seg in [hook_audio] + \
+               [AudioSegment.from_file(os.path.join(out_dir, f)) for f in []] + \
+               []:
+        # This dummy comprehension is removed below; we'll just rebuild full explicitly.
+        pass
 
-    full_path = os.path.join(out_dir, "full_story.mp3")
-    full.export(full_path, format="mp3")
-
-    # Timing info (durations in ms)
-    timeline = []
+    # Rebuild full from meta by reloading files in order
+    full = AudioSegment.silent(duration=0)
     cursor = 0
-    for seg in segments:
-        dur = len(seg["audio"])
+    timeline: List[Dict[str, Any]] = []
+
+    # We need to know which file corresponds to which segment. To keep it simple,
+    # reload in the same order we created them.
+    audio_paths: List[str] = [hook_path]
+    audio_paths.extend(
+        [os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.startswith("line_")]
+    )
+    audio_paths = sorted(audio_paths)  # ensure deterministic order
+
+    # But we already have durations in segments_meta, so just loop that instead.
+    # We'll rebuild full using the same TTS outputs in the same order:
+    # hook -> all lines (in order) -> closer.
+    full = AudioSegment.silent(duration=0)
+    cursor = 0
+    timeline = []
+
+    # Rebuild in the same order we appended: hook, lines, closer
+    for seg in segments_meta:
+        # Reload by type/order: simple but explicit
+        if seg["type"] == "hook":
+            audio = hook_audio
+        elif seg["type"] == "closer":
+            audio = closer_audio
+        else:
+            # For lines, re-synthesize from text to avoid tracking each path.
+            # If you prefer to avoid extra calls, you can track paths in segments_meta.
+            line_path = os.path.join(out_dir, f"line_rebuild_{uuid.uuid4().hex}.mp3")
+            tts_to_file(seg["text"], line_path)
+            audio = AudioSegment.from_file(line_path)
+
+        full += audio
+        start_ms = cursor
+        end_ms = cursor + len(audio)
+        cursor = end_ms
+
         timeline.append(
             {
                 "type": seg["type"],
                 "text": seg["text"],
-                "start_ms": cursor,
-                "end_ms": cursor + dur,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
             }
         )
-        cursor += dur
 
-    # Build chunked timeline for short, fast captions
-    chunked_timeline = []
-    for entry in timeline:
-        if entry["type"] in ("hook", "closer"):
-            chunked_timeline.extend(chunk_timeline_entry(entry, words_per_chunk=4))
-        else:
-            chunked_timeline.extend(chunk_timeline_entry(entry, words_per_chunk=3))
+    full_path = os.path.join(out_dir, "full_story.mp3")
+    full.export(full_path, format="mp3")
+
+    chunked_timeline = build_chunked_timeline(timeline)
 
     return {
-        "segments": segments,
         "timeline": chunked_timeline,
         "full_audio_path": full_path,
     }
 
 
-def create_video(script: dict, audio_info: dict, output_path: str = "storyshort_test.mp4"):
+# ---------------------------------------------------------------------------
+# Video assembly
+# ---------------------------------------------------------------------------
+
+def create_video(
+    script: Dict[str, Any],
+    audio_info: Dict[str, Any],
+    output_path: str = "storyshort_test.mp4",
+) -> str:
     WIDTH, HEIGHT = 1080, 1920
     BG_COLOR = (10, 10, 15)
 
@@ -222,7 +291,7 @@ def create_video(script: dict, audio_info: dict, output_path: str = "storyshort_
             TextClip(
                 text=txt,
                 font_size=60,
-                font=r"C:\Windows\Fonts\arial.ttf",
+                font=r"C:\Windows\Fonts\arial.ttf",  # consider making this a constant
                 color="white",
                 method="caption",
                 size=(WIDTH - 200, CAPTION_BOX_HEIGHT),
@@ -248,7 +317,11 @@ def create_video(script: dict, audio_info: dict, output_path: str = "storyshort_
     return output_path
 
 
-if __name__ == "__main__":
+# ---------------------------------------------------------------------------
+# CLI / entrypoint
+# ---------------------------------------------------------------------------
+
+def main():
     idea = "Gojo loses his powers and has to live like a normal teacher in Tokyo."
     script = generate_script(idea)
     audio_info = synthesize_script_audio(script)
@@ -259,3 +332,7 @@ if __name__ == "__main__":
 
     video_path = create_video(script, audio_info, output_path="storyshort_test.mp4")
     print("Video saved to:", video_path)
+
+
+if __name__ == "__main__":
+    main()
